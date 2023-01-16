@@ -1,0 +1,66 @@
+<#
+.SYNOPSIS
+    PostScript for Azure update management wit automation account and AVD.
+.DESCRIPTION
+	This script should be run as a PostScript in combination with the Azure update management utilising an automation account. 
+    This script is specificly targeted at AVD host update management. The script will assure that all VMs that where started before the update will be shut down again.
+	Therefore the Automation account identity needs the following RBAC rigths in the Azure tennant:
+		- Contributor on resource group that holds AVD hosts and hostpool
+	The following Powershell modules are required:
+		- Az.Accounts
+		- Az.Compute
+		- Az.DesktopVirtualization
+.PARAMETER Subscription
+	The Subscription containig the hostpool. 
+.PARAMETER HostpoolName
+	The name of the hostpool that contains the VMs to be updated.
+.PARAMETER ResourceGroupName
+	The RessourceGroup containing the hostpool.
+.NOTES
+	- Contributor ist not nerequired but i did not check the correct RBAC rights in a contect of least privilege
+#>
+
+Param (
+	[Parameter (Mandatory = $true)]
+	[String] $HostPoolName,
+	[Parameter (Mandatory = $true)]
+	[String] $ResourceGroupName,
+	[Parameter (Mandatory = $true)]
+	[String] $Subscription
+)
+
+#Connect to Azure with the identity of the automation account
+try {
+    Write-Output ("Connecting to Azure Account...")
+    Connect-AzAccount `
+    -Identity `
+    -SubscriptionId $Subscription `
+    -ErrorAction Stop| Out-Null    
+}
+catch {
+    $ErrorMessage = $PSItem.Exception.message
+    Write-Error ("Could not connect to Azure Account: "+$ErrorMessage)
+    exit(1)
+    Break
+}
+
+$AVDHosts = Get-AzWvdSessionHost -ResourceGroupName $ResourceGroupName -HostPoolName $HostPoolName
+
+foreach ($Item in $AVDHosts){
+	$HostName = $Item.Name.Split("/")[1]
+    $HostNameShort = $HostName.Split(".")[0]
+    $VM = Get-AzVM -Name $HostNameShort
+    $provisioningState = (Get-AzVM -ResourceGroupName $VM.ResourceGroupName  -Name $HostNameShort -Status).Statuses[1].Code
+
+    if($provisioningState -eq "PowerState/running" -or $provisioningState -eq "PowerState/starting"){
+        $Session = Get-AzWvdUserSession -HostPoolName $HostPoolName -ResourceGroupName $ResourceGroupName -SessionHostName $HostName
+        if(!$Session){
+            Write-Output("Host $HostName has no sessions shutting down...")
+            Stop-AzVM -Name $HostNameShort -ResourceGroupName $VM.ResourceGroupName -Force -NoWait
+        }
+        Update-AzWvdSessionHost -HostPoolName $HostPoolName -ResourceGroupName $ResourceGroupName -Name $HostName -AllowNewSession:$true
+    }else{
+        Write-Output("Host $HostName is not running")
+        Update-AzWvdSessionHost -HostPoolName $HostPoolName -ResourceGroupName $ResourceGroupName -Name $HostName -AllowNewSession:$true
+    }
+}
